@@ -9,6 +9,7 @@ description = "Code from the paper State Machine Frameworks for Website Fingerpr
 
 [dependencies]
 maybenot = "2.0.1"
+maybenot-simulator= "2.0.1"
 rand = "0.7.3"
 enum-map = "2.7.3"
 
