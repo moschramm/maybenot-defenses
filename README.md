@@ -25,6 +25,16 @@ Specifically, the binaries can be run as follows:
  - Maybenot RegulaTor: `./target/release/maybenot-regulator <R> <D> <T> <U> <cells per state>`
  - Maybenot Surakav: `./target/release/maybenot-surakav <ref trace path>`
 
+ ### Maybenot Simulator
+
+ To simulate a machine's behavior with the `maybenot-simulator` crate run:
+
+ ```shell
+ cargo run --bin maybenot_simulator
+ # uses a machine built by running
+ # cargo run --bin maybenot_front 14 2500 50
+ ```
+
 ## License Info
 
 The code in this repository is available under the BSD-3-Clause license.
