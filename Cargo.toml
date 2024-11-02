@@ -8,8 +8,9 @@ repository = "https://github.com/ewitwer/maybenot-defenses"
 description = "Code from the paper State Machine Frameworks for Website Fingerprinting Defenses: Maybe Not"
 
 [dependencies]
-maybenot = { path = "../maybenot" }
+maybenot = "2.0.1"
 rand = "0.7.3"
+enum-map = "2.7.3"
 
 [[bin]]
 name = "maybenot_front"

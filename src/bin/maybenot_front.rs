@@ -1,20 +1,21 @@
 // Maybenot FRONT -- uses normally distributed padding to approximate the FRONT defense
 // Code from the paper "State Machine Frameworks for Website Fingerprinting Defenses: Maybe Not"
 
-use std::collections::HashMap;
+use enum_map::enum_map;
 use std::env;
 use std::f64::consts::E;
 use std::f64::consts::PI;
 use std::f64::EPSILON;
 
 use maybenot::{
+    action::Action,
+    constants::STATE_END,
     dist::{Dist, DistType},
     event::Event,
-    machine::Machine,
     state::State,
+    state::Trans,
+    Machine,
 };
-
-const TOR_CELL_SIZE: f64 = 512.0;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -43,7 +44,7 @@ fn generate_machine(padding_window: f64, padding_budget: u32, num_states: usize)
 
     // States
     let mut states: Vec<State> = Vec::with_capacity(num_states + 1);
-    states.push(generate_start_state(num_states + 1));
+    states.push(generate_start_state());
 
     let mut t1 = 0.0; // Starting time of next PADDING state
     let mut total_padding_frac = 0.0; // Area coverage of current PADDING states
@@ -60,7 +61,6 @@ fn generate_machine(padding_window: f64, padding_budget: u32, num_states: usize)
         states.push(generate_padding_state(
             i,
             i + 1,
-            num_states + 1,
             padding_count,
             timeout,
             stdev,
@@ -78,10 +78,9 @@ fn generate_machine(padding_window: f64, padding_budget: u32, num_states: usize)
     let timeout = width / padding_count;
     let stdev = (padding_window).powi(2) / (padding_count * middle * PI.sqrt());
 
-    states.push(generate_padding_state(
+    // add last padding state
+    states.push(generate_last_padding_state(
         num_states,
-        num_states + 2,
-        num_states + 1,
         padding_count,
         timeout,
         stdev,
@@ -89,12 +88,11 @@ fn generate_machine(padding_window: f64, padding_budget: u32, num_states: usize)
 
     // Machine
     let machine = Machine {
-        allowed_padding_bytes: u64::MAX,
+        allowed_padding_packets: u64::MAX,
         max_padding_frac: 0.0,
         allowed_blocked_microsec: 0,
         max_blocking_frac: 0.0,
         states: states,
-        include_small_packets: false,
     };
 
     return machine.serialize();
@@ -104,67 +102,90 @@ fn generate_machine(padding_window: f64, padding_budget: u32, num_states: usize)
 fn generate_padding_state(
     curr_index: usize,
     next_index: usize,
-    num_states: usize,
     padding_count: f64,
     timeout: f64,
     stdev: f64,
 ) -> State {
-    // PaddingSent --> this PADDING state (100%)
-    let mut padding_sent: HashMap<usize, f64> = HashMap::new();
-    padding_sent.insert(curr_index, 1.0);
+    let mut state = State::new(enum_map! {
+        Event::PaddingSent => vec![Trans(curr_index, 1.0)],
+        Event::LimitReached => vec![Trans(next_index, 1.0)],
+        _ => vec![],
+    });
 
-    // LimitReached --> next PADDING state or StateEnd (100%)
-    let mut limit_reached: HashMap<usize, f64> = HashMap::new();
-    limit_reached.insert(next_index, 1.0);
+    let timeout = Dist::new(
+        DistType::Normal {
+            mean: timeout,
+            stdev: stdev,
+        },
+        0.0,
+        timeout * 2.0,
+    );
+    let limit = Dist::new(
+        DistType::Uniform {
+            low: 1.0,
+            high: padding_count,
+        },
+        0.0,
+        0.0,
+    );
 
-    let mut transitions: HashMap<Event, HashMap<usize, f64>> = HashMap::new();
-    transitions.insert(Event::PaddingSent, padding_sent);
-    transitions.insert(Event::LimitReached, limit_reached);
+    state.action = Some(Action::SendPadding {
+        bypass: false,
+        replace: false,
+        timeout: timeout,
+        limit: Some(limit),
+    });
 
-    let mut state = State::new(transitions, num_states);
+    return state;
+}
 
-    state.timeout = Dist {
-        dist: DistType::Normal,
-        param1: timeout,
-        param2: stdev,
-        start: 0.0,
-        max: (timeout * 2.0),
-    };
+// Generate the last PADDING state for a machine.
+fn generate_last_padding_state(
+    curr_index: usize,
+    padding_count: f64,
+    timeout: f64,
+    stdev: f64,
+) -> State {
+    let mut state = State::new(enum_map! {
+        Event::PaddingSent => vec![Trans(curr_index, 1.0)],
+        Event::LimitReached => vec![Trans(STATE_END, 1.0)],
+        _ => vec![],
+    });
 
-    state.action = Dist {
-        dist: DistType::Uniform,
-        param1: TOR_CELL_SIZE,
-        param2: TOR_CELL_SIZE,
-        start: 0.0,
-        max: 0.0,
-    };
+    let timeout = Dist::new(
+        DistType::Normal {
+            mean: timeout,
+            stdev: stdev,
+        },
+        0.0,
+        timeout * 2.0,
+    );
+    let limit = Dist::new(
+        DistType::Uniform {
+            low: 1.0,
+            high: padding_count,
+        },
+        0.0,
+        0.0,
+    );
 
-    state.limit = Dist {
-        dist: DistType::Uniform,
-        param1: 1.0,
-        param2: padding_count,
-        start: 0.0,
-        max: 0.0,
-    };
+    state.action = Some(Action::SendPadding {
+        bypass: false,
+        replace: false,
+        timeout: timeout,
+        limit: Some(limit),
+    });
 
     return state;
 }
 
 // Generate the START state for a machine.
-fn generate_start_state(num_states: usize) -> State {
-    // NonPaddingSent --> first PADDING state (100%)
-    let mut nonpadding_sent: HashMap<usize, f64> = HashMap::new();
-    nonpadding_sent.insert(1, 1.0);
-
-    // NonPaddingRecv --> first PADDING state (100%)
-    let mut nonpadding_recv: HashMap<usize, f64> = HashMap::new();
-    nonpadding_recv.insert(1, 1.0);
-
-    let mut transitions: HashMap<Event, HashMap<usize, f64>> = HashMap::new();
-    transitions.insert(Event::NonPaddingSent, nonpadding_sent);
-    transitions.insert(Event::NonPaddingRecv, nonpadding_recv);
-
-    return State::new(transitions, num_states);
+fn generate_start_state() -> State {
+    return State::new(enum_map! {
+        Event::NormalSent => vec![Trans(1, 1.0)],
+        Event::NormalRecv => vec![Trans(1, 1.0)],
+        _ => vec![],
+    });
 }
 
 // Find the width of an interval in the Rayleigh distribution,
