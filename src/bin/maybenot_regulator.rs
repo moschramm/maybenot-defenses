@@ -1,18 +1,18 @@
 // Maybenot RegulaTor -- uses constant-rate traffic to approximate the RegulaTor defense
 // Code from the paper "State Machine Frameworks for Website Fingerprinting Defenses: Maybe Not"
 
-use std::collections::HashMap;
+use enum_map::enum_map;
 use std::env;
 use std::f64::INFINITY;
 
 use maybenot::{
+    action::Action,
     dist::{Dist, DistType},
     event::Event,
-    machine::Machine,
     state::State,
+    state::Trans,
+    Machine,
 };
-
-const TOR_CELL_SIZE: f64 = 512.0;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -66,115 +66,97 @@ fn generate_client_machine(upload_ratio: f64) -> String {
     }
 
     // SEND state
-    states.push(generate_client_send_state(num_states));
+    states.push(generate_client_send_state());
 
     // Machine construction
     let machine = Machine {
-        allowed_padding_bytes: u64::MAX,
+        allowed_padding_packets: u64::MAX,
         max_padding_frac: 0.0,
         allowed_blocked_microsec: u64::MAX,
         max_blocking_frac: 0.0,
         states: states,
-        include_small_packets: false,
     };
 
     return machine.serialize();
 }
 
-fn generate_client_send_state(num_states: usize) -> State {
-    // PaddingSent --> COUNT_0 (100%)
-    let mut padding_sent: HashMap<usize, f64> = HashMap::new();
-    padding_sent.insert(0, 1.0);
-
-    // Transitions
-    let mut transitions: HashMap<Event, HashMap<usize, f64>> = HashMap::new();
-    transitions.insert(Event::PaddingSent, padding_sent);
-
+fn generate_client_send_state() -> State {
     // SEND state
-    let mut state = State::new(transitions, num_states);
-    state.bypass = true;
-    state.replace = true;
+    let mut state = State::new(enum_map! {
+        Event::PaddingSent => vec![Trans(0, 1.0)],
+        _ => vec![],
+    });
 
-    state.timeout = Dist {
-        dist: DistType::Uniform,
-        param1: 0.0,
-        param2: 0.0,
-        start: 0.0,
-        max: 0.0,
-    };
+    let timeout = Dist::new(
+        DistType::Uniform {
+            low: 0.0,
+            high: 0.0,
+        },
+        0.0,
+        0.0,
+    );
 
-    state.action = Dist {
-        dist: DistType::Uniform,
-        param1: TOR_CELL_SIZE,
-        param2: TOR_CELL_SIZE,
-        start: 0.0,
-        max: 0.0,
-    };
+    state.action = Some(Action::SendPadding {
+        bypass: true,
+        replace: true,
+        timeout: timeout,
+        limit: None,
+    });
 
     return state;
 }
 
-fn generate_client_count_state(
-    curr_index: usize,
-    next_index: usize,
-    num_states: usize,
-    prob_trans: f64,
-) -> State {
-    // PaddingRecv --> COUNT_[i+1] (prob_trans)
-    let mut padding_recv: HashMap<usize, f64> = HashMap::new();
-    padding_recv.insert(next_index, prob_trans);
+fn generate_client_count_state(curr_index: usize, next_index: usize, prob_trans: f32) -> State {
+    // Transition to next COUNTER state or stay in current one
+    let mut state;
+
     if prob_trans < 1.0 {
-        padding_recv.insert(curr_index, 1.0 - prob_trans);
+        state = State::new(enum_map! {
+            Event::PaddingRecv => vec![Trans(next_index, prob_trans), Trans(curr_index, 1.0 - prob_trans)],
+            Event::NormalRecv => vec![Trans(next_index, prob_trans), Trans(curr_index, 1.0 - prob_trans)],
+            Event::LimitReached => vec![Trans(next_index, 1.0)],
+            _ => vec![],
+        });
+    } else {
+        state = State::new(enum_map! {
+            Event::PaddingRecv => vec![Trans(next_index, prob_trans)],
+            Event::NormalRecv => vec![Trans(next_index, prob_trans)],
+            _ => vec![],
+        });
     }
 
-    // NonPaddingRecv --> COUNT_[i+1] (prob_trans)
-    let mut nonpadding_recv: HashMap<usize, f64> = HashMap::new();
-    nonpadding_recv.insert(next_index, prob_trans);
-    if prob_trans < 1.0 {
-        nonpadding_recv.insert(curr_index, 1.0 - prob_trans);
-    }
+    let timeout = Dist::new(
+        DistType::Uniform {
+            low: 0.0,
+            high: 0.0,
+        },
+        0.0,
+        0.0,
+    );
 
-    // LimitReached --> COUNT_[i+1] (100%)
-    let mut limit_reached: HashMap<usize, f64> = HashMap::new();
-    limit_reached.insert(next_index, 1.0);
+    let limit = Dist::new(
+        DistType::Uniform {
+            low: 2.0,
+            high: 2.0,
+        },
+        0.0,
+        0.0,
+    );
 
-    // Transitions
-    let mut transitions: HashMap<Event, HashMap<usize, f64>> = HashMap::new();
-    transitions.insert(Event::PaddingRecv, padding_recv);
-    transitions.insert(Event::NonPaddingRecv, nonpadding_recv);
-    if prob_trans < 1.0 {
-        transitions.insert(Event::LimitReached, limit_reached);
-    }
-
-    // COUNTER_i state
-    let mut state = State::new(transitions, num_states);
-    state.action_is_block = true;
-    state.bypass = true;
-    state.replace = true;
-
-    state.timeout = Dist {
-        dist: DistType::Uniform,
-        param1: 0.0,
-        param2: 0.0,
-        start: 0.0,
-        max: 0.0,
-    };
-
-    state.action = Dist {
-        dist: DistType::Uniform,
-        param1: INFINITY,
-        param2: INFINITY,
-        start: 0.0,
-        max: 0.0,
-    };
-
-    state.limit = Dist {
-        dist: DistType::Uniform,
-        param1: 2.0,
-        param2: 2.0,
-        start: 0.0,
-        max: 0.0,
-    };
+    state.action = Some(Action::BlockOutgoing {
+        bypass: true,
+        replace: true,
+        timeout: timeout,
+        duration: Dist {
+            dist: DistType::Uniform {
+                low: INFINITY,
+                high: INFINITY,
+            },
+            start: 0.0,
+            max: 0.0,
+        },
+        limit: Some(limit),
+    });
 
     return state;
 }
