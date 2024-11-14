@@ -7,6 +7,7 @@ use std::f64::INFINITY;
 
 use maybenot::{
     action::Action,
+    constants::STATE_END,
     dist::{Dist, DistType},
     event::Event,
     state::State,
@@ -46,7 +47,7 @@ fn main() {
 fn generate_client_machine(upload_ratio: f64) -> String {
     // Set up state vector
     let num_states = (upload_ratio as usize) + 1;
-    let prob_last_trans = 1.0 - upload_ratio.fract();
+    let prob_last_trans = 1.0 - upload_ratio.fract() as f32;
 
     let mut states: Vec<State> = Vec::with_capacity(num_states);
 
@@ -57,12 +58,7 @@ fn generate_client_machine(upload_ratio: f64) -> String {
             prob_trans = prob_last_trans;
         }
 
-        states.push(generate_client_count_state(
-            i - 1,
-            i,
-            num_states,
-            prob_trans,
-        ));
+        states.push(generate_client_count_state(i - 1, i, prob_trans));
     }
 
     // SEND state
@@ -192,19 +188,19 @@ fn generate_relay_machine(
     let mut states: Vec<State> = Vec::with_capacity(num_states);
 
     // START states
-    states.push(generate_relay_start_state(num_states));
-    states.push(generate_relay_block_state(num_states));
+    states.push(generate_relay_start_state());
+    states.push(generate_relay_block_state());
 
     // BOOTSTRAP states
-    states.push(generate_relay_boot_state(2, 3, num_states, 100000.0));
-    states.push(generate_relay_boot_state(3, 4, num_states, 100000.0));
-    states.push(generate_relay_boot_state(4, 5, num_states, 100000.0));
-    states.push(generate_relay_boot_state(5, 6, num_states, 100000.0));
-    states.push(generate_relay_boot_state(6, 7, num_states, 100000.0));
-    states.push(generate_relay_boot_state(7, 8, num_states, 100000.0));
-    states.push(generate_relay_boot_state(8, 9, num_states, 100000.0));
-    states.push(generate_relay_boot_state(9, 10, num_states, 100000.0));
-    states.push(generate_relay_boot_state(10, 11, num_states, 100000.0));
+    states.push(generate_relay_boot_state(2, 3, 100000.0));
+    states.push(generate_relay_boot_state(3, 4, 100000.0));
+    states.push(generate_relay_boot_state(4, 5, 100000.0));
+    states.push(generate_relay_boot_state(5, 6, 100000.0));
+    states.push(generate_relay_boot_state(6, 7, 100000.0));
+    states.push(generate_relay_boot_state(7, 8, 100000.0));
+    states.push(generate_relay_boot_state(8, 9, 100000.0));
+    states.push(generate_relay_boot_state(9, 10, 100000.0));
+    states.push(generate_relay_boot_state(10, 11, 100000.0));
 
     // SEND_i states
     t1 = 0.0;
@@ -220,13 +216,12 @@ fn generate_relay_machine(
 
         if width == INFINITY || rate < 1.0 {
             rate = 1.0;
-            next_idx = num_states + 1; // StateEnd
+            next_idx = STATE_END; // StateEnd
         }
 
         states.push(generate_relay_send_state(
             curr_idx,
             next_idx,
-            num_states,
             packets_per_state,
             1000000.0 / rate,
             threshold,
@@ -238,12 +233,11 @@ fn generate_relay_machine(
 
     // Machine construction
     let machine = Machine {
-        allowed_padding_bytes: u64::MAX,
+        allowed_padding_packets: u64::MAX,
         max_padding_frac: 0.0,
         allowed_blocked_microsec: u64::MAX,
         max_blocking_frac: 0.0,
         states: states,
-        include_small_packets: false,
     };
 
     return machine.serialize();
@@ -253,155 +247,130 @@ fn generate_relay_machine(
 fn generate_relay_send_state(
     curr_index: usize,
     next_index: usize,
-    num_states: usize,
     padding_count: f64,
     timeout: f64,
     threshold: f64,
     rate: f64,
 ) -> State {
-    // PaddingSent --> SEND_i (100%)
-    let mut padding_sent: HashMap<usize, f64> = HashMap::new();
-    padding_sent.insert(curr_index, 1.0);
+    // SEND_i state
+    let mut state;
 
-    // LimitReached --> SEND_[i+1] or StateEnd (100%)
-    let mut limit_reached: HashMap<usize, f64> = HashMap::new();
-    limit_reached.insert(next_index, 1.0);
-
-    // NonPaddingSent --> SEND_0 (2.0 / threshold * rate)
-    // NonPaddingSent --> StateNop (remaining probability)
-    let mut nonpadding_sent: HashMap<usize, f64> = HashMap::new();
-    nonpadding_sent.insert(11, 2.0 / (threshold * rate));
-
-    // Transitions
-    let mut transitions: HashMap<Event, HashMap<usize, f64>> = HashMap::new();
-    transitions.insert(Event::PaddingSent, padding_sent);
-    transitions.insert(Event::LimitReached, limit_reached);
     if curr_index > 11 {
-        transitions.insert(Event::NonPaddingSent, nonpadding_sent);
+        state = State::new(enum_map! {
+            Event::PaddingSent => vec![Trans(curr_index, 1.0)],
+            Event::LimitReached => vec![Trans(next_index, 1.0)],
+            Event::NormalSent => vec![Trans(11, 2.0 / (threshold * rate) as f32)],
+            _ => vec![],
+        });
+    } else {
+        state = State::new(enum_map! {
+            Event::PaddingSent => vec![Trans(curr_index, 1.0)],
+            Event::LimitReached => vec![Trans(next_index, 1.0)],
+            _ => vec![],
+        });
     }
 
-    // SEND_i state
-    let mut state = State::new(transitions, num_states);
-    state.bypass = true;
-    state.replace = true;
+    let timeout = Dist::new(
+        DistType::Uniform {
+            low: timeout,
+            high: timeout,
+        },
+        0.0,
+        0.0,
+    );
 
-    state.timeout = Dist {
-        dist: DistType::Uniform,
-        param1: timeout,
-        param2: timeout,
-        start: 0.0,
-        max: 0.0,
-    };
+    let limit = Dist::new(
+        DistType::Uniform {
+            low: padding_count,
+            high: padding_count,
+        },
+        0.0,
+        0.0,
+    );
 
-    state.action = Dist {
-        dist: DistType::Uniform,
-        param1: TOR_CELL_SIZE,
-        param2: TOR_CELL_SIZE,
-        start: 0.0,
-        max: 0.0,
-    };
-
-    state.limit = Dist {
-        dist: DistType::Uniform,
-        param1: padding_count,
-        param2: padding_count,
-        start: 0.0,
-        max: 0.0,
-    };
+    state.action = Some(Action::SendPadding {
+        bypass: true,
+        replace: true,
+        timeout: timeout,
+        limit: Some(limit),
+    });
 
     return state;
 }
 
 // Generate a BOOT state for a relay-side machine.
-fn generate_relay_boot_state(
-    curr_index: usize,
-    next_index: usize,
-    num_states: usize,
-    timeout: f64,
-) -> State {
-    // PaddingSent --> BOOT_i (100%)
-    let mut padding_sent: HashMap<usize, f64> = HashMap::new();
-    padding_sent.insert(curr_index, 1.0);
+fn generate_relay_boot_state(curr_index: usize, next_index: usize, timeout: f64) -> State {
+    let mut state = State::new(enum_map! {
+        Event::PaddingSent => vec![Trans(curr_index, 1.0)],
+        Event::NormalSent => vec![Trans(next_index, 1.0)],
+        _ => vec![],
+    });
 
-    // NonPaddingSent --> BOOT_[i+1] or SEND_0 (100%)
-    let mut nonpadding_sent: HashMap<usize, f64> = HashMap::new();
-    nonpadding_sent.insert(next_index, 1.0);
+    let timeout = Dist::new(
+        DistType::Uniform {
+            low: timeout,
+            high: timeout,
+        },
+        0.0,
+        0.0,
+    );
 
-    // Transitions
-    let mut transitions: HashMap<Event, HashMap<usize, f64>> = HashMap::new();
-    transitions.insert(Event::PaddingSent, padding_sent);
-    transitions.insert(Event::NonPaddingSent, nonpadding_sent);
-
-    // SEND_i state
-    let mut state = State::new(transitions, num_states);
-    state.bypass = true;
-    state.replace = true;
-
-    state.timeout = Dist {
-        dist: DistType::Uniform,
-        param1: timeout,
-        param2: timeout,
-        start: 0.0,
-        max: 0.0,
-    };
-
-    state.action = Dist {
-        dist: DistType::Uniform,
-        param1: TOR_CELL_SIZE,
-        param2: TOR_CELL_SIZE,
-        start: 0.0,
-        max: 0.0,
-    };
+    state.action = Some(Action::SendPadding {
+        bypass: true,
+        replace: true,
+        timeout: timeout,
+        limit: None,
+    });
 
     return state;
 }
 
 // Generate the BLOCK state for a relay-side machine.
-fn generate_relay_block_state(num_states: usize) -> State {
+fn generate_relay_block_state() -> State {
     // BlockingBegin --> BOOT_0 (100%)
-    let mut blocking_begin: HashMap<usize, f64> = HashMap::new();
-    blocking_begin.insert(2, 1.0);
+    let mut state = State::new(enum_map! {
+        Event::BlockingBegin => vec![Trans(2, 1.0)],
+        _ => vec![],
+    });
 
-    // Transitions
-    let mut transitions: HashMap<Event, HashMap<usize, f64>> = HashMap::new();
-    transitions.insert(Event::BlockingBegin, blocking_begin);
+    let duration = Dist::new(
+        DistType::Uniform {
+            low: INFINITY,
+            high: INFINITY,
+        },
+        0.0,
+        0.0,
+    );
 
-    // BLOCK state
-    let mut state = State::new(transitions, num_states);
-    state.action_is_block = true;
-    state.bypass = true;
-    state.replace = true;
+    let timeout = Dist::new(
+        DistType::Uniform {
+            low: 0.0,
+            high: 0.0,
+        },
+        0.0,
+        0.0,
+    );
 
-    state.timeout = Dist {
-        dist: DistType::Uniform,
-        param1: 0.0,
-        param2: 0.0,
-        start: 0.0,
-        max: 0.0,
-    };
-
-    state.action = Dist {
-        dist: DistType::Uniform,
-        param1: INFINITY,
-        param2: INFINITY,
-        start: 0.0,
-        max: 0.0,
-    };
+    state.action = Some(Action::BlockOutgoing {
+        bypass: true,
+        replace: true,
+        timeout: timeout,
+        duration: duration,
+        limit: None,
+    });
 
     return state;
 }
 
 // Generate the START state for a machine.
-fn generate_relay_start_state(num_states: usize) -> State {
+fn generate_relay_start_state() -> State {
     // NonPaddingSent --> BLOCK (100%)
-    let mut nonpadding_sent: HashMap<usize, f64> = HashMap::new();
-    nonpadding_sent.insert(1, 1.0);
+    let state = State::new(enum_map! {
+        Event::NormalSent => vec![Trans(1, 1.0)],
+        _ => vec![],
+    });
 
-    // Transitions
-    let mut transitions: HashMap<Event, HashMap<usize, f64>> = HashMap::new();
-    transitions.insert(Event::NonPaddingSent, nonpadding_sent);
-
-    return State::new(transitions, num_states);
+    return state;
 }
 
 // Find the width of an interval of the function RD^t, from a, with the specified packet count.
