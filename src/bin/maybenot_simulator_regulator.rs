@@ -1,6 +1,6 @@
 use maybenot::{event::TriggerEvent, Machine};
 use maybenot_simulator::{network::Network, parse_trace, sim};
-use std::{str::FromStr, time::Duration};
+use std::{fs::File, str::FromStr, time::Duration};
 
 fn main() {
     // A trace of ten packets from the client's perspective when visiting
@@ -40,6 +40,11 @@ fn main() {
     // until 100 packets have been recorded (total, client and server).
     let trace = sim(&[cm], &[sm], &mut input_trace, network.delay, 100, true);
 
+    // create writer for csv file and write header
+    let file = File::create("../simulator-results/maybenot_regulator_v2.csv").unwrap();
+    let mut wtr = csv::Writer::from_writer(file);
+    wtr.write_record(&["time", "sent", "padding"]).unwrap();
+
     // print packets from the client's perspective
     let starting_time = trace[0].time;
     trace
@@ -48,11 +53,15 @@ fn main() {
         .for_each(|p| match p.event {
             TriggerEvent::TunnelSent => {
                 if p.contains_padding {
+                    wtr.serialize(((p.time - starting_time).as_millis(), true, true))
+                        .unwrap();
                     println!(
                         "sent a padding packet at {} ms",
                         (p.time - starting_time).as_millis()
                     );
                 } else {
+                    wtr.serialize(((p.time - starting_time).as_millis(), true, false))
+                        .unwrap();
                     println!(
                         "sent a normal packet at {} ms",
                         (p.time - starting_time).as_millis()
@@ -61,11 +70,15 @@ fn main() {
             }
             TriggerEvent::TunnelRecv => {
                 if p.contains_padding {
+                    wtr.serialize(((p.time - starting_time).as_millis(), false, true))
+                        .unwrap();
                     println!(
                         "received a padding packet at {} ms",
                         (p.time - starting_time).as_millis()
                     );
                 } else {
+                    wtr.serialize(((p.time - starting_time).as_millis(), false, false))
+                        .unwrap();
                     println!(
                         "received a normal packet at {} ms",
                         (p.time - starting_time).as_millis()
@@ -74,4 +87,5 @@ fn main() {
             }
             _ => {}
         });
+    wtr.flush().unwrap();
 }
